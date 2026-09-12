@@ -17,6 +17,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "command.invoke",
     "integration.install",
     "integration.list",
+    "layout.rearrange",
     "layout.set_split_ratio",
     "pane.close",
     "pane.copy_motion",

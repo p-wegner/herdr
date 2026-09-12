@@ -165,6 +165,34 @@ pub struct LayoutApplyParams {
     pub root: LayoutNode,
 }
 
+/// Re-tile a tab's existing panes into a named shape.
+///
+/// Unlike `layout.apply`, this never creates or destroys a pane: the tab keeps
+/// exactly the panes it has, with their processes, and only the split tree
+/// above them is rebuilt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LayoutRearrangeParams {
+    /// Target tab. Defaults to the active tab of the active workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    pub shape: LayoutShape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutShape {
+    /// As square as the pane count allows, rows of columns.
+    Grid,
+    /// One column per pane, left to right.
+    Columns,
+    /// One row per pane, top to bottom.
+    Rows,
+    /// First pane keeps the left half; the rest stack in the right half.
+    MainVertical,
+    /// First pane keeps the top half; the rest sit side by side below.
+    MainHorizontal,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LayoutSetSplitRatioParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]

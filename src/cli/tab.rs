@@ -15,6 +15,7 @@ pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         "focus" => tab_focus(&args[1..]),
         "rename" => tab_rename(&args[1..]),
         "close" => tab_close(&args[1..]),
+        "rearrange" => tab_rearrange(&args[1..]),
         "help" | "--help" | "-h" => {
             print_tab_help();
             Ok(0)
@@ -24,6 +25,65 @@ pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn tab_rearrange(args: &[String]) -> std::io::Result<i32> {
+    use crate::api::schema::{LayoutRearrangeParams, LayoutShape};
+
+    let mut tab_id = None;
+    let mut shape = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--tab" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --tab");
+                    return Ok(2);
+                };
+                tab_id = Some(super::normalize_tab_id(value));
+                index += 2;
+            }
+            "--shape" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --shape");
+                    return Ok(2);
+                };
+                shape = Some(match value.as_str() {
+                    "grid" => LayoutShape::Grid,
+                    "columns" => LayoutShape::Columns,
+                    "rows" => LayoutShape::Rows,
+                    "main-vertical" => LayoutShape::MainVertical,
+                    "main-horizontal" => LayoutShape::MainHorizontal,
+                    other => {
+                        eprintln!(
+                            "unknown shape {other:?}; expected grid, columns, rows, \
+                             main-vertical or main-horizontal"
+                        );
+                        return Ok(2);
+                    }
+                });
+                index += 2;
+            }
+            other => {
+                eprintln!("unexpected argument {other:?}");
+                return Ok(2);
+            }
+        }
+    }
+
+    let Some(shape) = shape else {
+        eprintln!("missing --shape");
+        return Ok(2);
+    };
+
+    super::print_response(&super::send_request(&crate::api::schema::Request {
+        id: "cli:tab:rearrange".into(),
+        method: crate::api::schema::Method::LayoutRearrange(LayoutRearrangeParams {
+            tab_id,
+            shape,
+        }),
+    })?)
 }
 
 fn tab_list(args: &[String]) -> std::io::Result<i32> {
@@ -184,4 +244,7 @@ fn print_tab_help() {
     eprintln!("  herdr tab focus <tab_id>");
     eprintln!("  herdr tab rename <tab_id> <label>");
     eprintln!("  herdr tab close <tab_id>");
+    eprintln!(
+        "  herdr tab rearrange [--tab <tab_id>] --shape grid|columns|rows|main-vertical|main-horizontal"
+    );
 }

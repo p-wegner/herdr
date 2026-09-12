@@ -4,7 +4,8 @@ use ratatui::layout::Direction;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutDescription, LayoutExportParams,
-    LayoutNode, LayoutPane, LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
+    LayoutNode, LayoutPane, LayoutRearrangeParams, LayoutSetSplitRatioParams, LayoutShape,
+    ResponseResult, SplitDirection,
 };
 use crate::app::{App, Mode};
 use crate::layout::{Node, PaneId};
@@ -249,6 +250,81 @@ impl App {
         };
         self.emit_layout_updated_event(ws_idx, tab_idx);
         encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
+    }
+
+
+    /// Re-tile a tab's existing panes into a named shape.
+    ///
+    /// The tab's panes live in `Tab::panes`, keyed by `PaneId`; the split tree
+    /// only *references* them. So rebuilding the tree moves no process and
+    /// touches no PTY -- it is purely a change of arrangement. The invariant
+    /// that keeps that true is asserted below: the rebuilt tree must contain
+    /// exactly the pane set the old one did.
+    pub(super) fn handle_layout_rearrange(
+        &mut self,
+        id: String,
+        params: LayoutRearrangeParams,
+    ) -> String {
+        let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&LayoutExportParams {
+            tab_id: params.tab_id,
+            pane_id: None,
+        }) else {
+            return encode_error(id, "layout_not_found", "layout target not found");
+        };
+
+        let Some(tab) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+        else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+
+        // A zoomed tab renders one pane full-screen; pane move refuses outright
+        // rather than silently reshaping what the user cannot see. Rearranging is
+        // safe to do as long as the zoom is dropped first, which is also what
+        // inserting a moved pane does (Tab::insert_existing_pane).
+        tab.zoomed = false;
+
+        let panes = tab.layout.pane_ids();
+        if panes.len() < 2 {
+            // Nothing to arrange, and no reason to call it an error.
+            let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
+                return encode_error(id, "layout_not_found", "layout unavailable");
+            };
+            return encode_success(id, ResponseResult::LayoutRearrange { layout });
+        }
+
+        let focus = tab.layout.focused();
+        let root = build_shape(&panes, params.shape);
+
+        // Never install a tree that lost or duplicated a pane: that would orphan
+        // a live terminal with no way to reach it.
+        let mut after = Vec::new();
+        collect_shape_ids(&root, &mut after);
+        // Compare as multisets: a set alone would not catch a pane appearing
+        // twice, which would put one terminal in two places in the tree.
+        let mut before_ids: Vec<u32> = panes.iter().map(|pane| pane.raw()).collect();
+        let mut after_ids: Vec<u32> = after.iter().map(|pane| pane.raw()).collect();
+        before_ids.sort_unstable();
+        after_ids.sort_unstable();
+        if before_ids != after_ids {
+            return encode_error(
+                id,
+                "rearrange_failed",
+                "rebuilt layout did not preserve the tab's panes",
+            );
+        }
+
+        tab.layout = crate::layout::TileLayout::from_saved(root, focus);
+
+        self.schedule_session_save();
+        let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+        self.emit_layout_updated_event(ws_idx, tab_idx);
+        encode_success(id, ResponseResult::LayoutRearrange { layout })
     }
 
     fn resolve_layout_export_target(&self, params: &LayoutExportParams) -> Option<(usize, usize)> {
@@ -925,5 +1001,213 @@ mod tests {
 
         let err = validate_layout_tree(&root).unwrap_err();
         assert!(err.contains("maximum"));
+    }
+}
+
+fn collect_shape_ids(node: &Node, out: &mut Vec<PaneId>) {
+    match node {
+        Node::Pane(id) => out.push(*id),
+        Node::Split { first, second, .. } => {
+            collect_shape_ids(first, out);
+            collect_shape_ids(second, out);
+        }
+    }
+}
+
+/// Split a slice into a balanced binary tree along one axis, giving each child
+/// a ratio proportional to how many panes it carries -- so five columns come
+/// out even rather than halving down to a sliver.
+fn balanced(panes: &[PaneId], direction: Direction) -> Node {
+    debug_assert!(!panes.is_empty());
+    if panes.len() == 1 {
+        return Node::Pane(panes[0]);
+    }
+    let split = panes.len() / 2;
+    let (left, right) = panes.split_at(split);
+    Node::Split {
+        direction,
+        ratio: left.len() as f32 / panes.len() as f32,
+        first: Box::new(balanced(left, direction)),
+        second: Box::new(balanced(right, direction)),
+    }
+}
+
+/// Rows of columns, as square as the count allows. Any remainder goes to the
+/// earlier rows, so 5 panes are 3 over 2 rather than 2 over 3.
+fn grid(panes: &[PaneId]) -> Node {
+    let count = panes.len();
+    let rows = (count as f64).sqrt().round().max(1.0) as usize;
+    let rows = rows.min(count);
+    let per_row = count / rows;
+    let mut remainder = count % rows;
+
+    let mut row_nodes = Vec::with_capacity(rows);
+    let mut rest = panes;
+    let mut weights = Vec::with_capacity(rows);
+    for _ in 0..rows {
+        let mut take = per_row;
+        if remainder > 0 {
+            take += 1;
+            remainder -= 1;
+        }
+        let (row, tail) = rest.split_at(take);
+        weights.push(row.len());
+        row_nodes.push(balanced(row, Direction::Horizontal));
+        rest = tail;
+    }
+    stack(row_nodes, Direction::Vertical)
+}
+
+/// Combine already-built nodes along one axis, balanced the same way.
+fn stack(mut nodes: Vec<Node>, direction: Direction) -> Node {
+    debug_assert!(!nodes.is_empty());
+    if nodes.len() == 1 {
+        return nodes.pop().expect("checked above");
+    }
+    let split = nodes.len() / 2;
+    let total = nodes.len();
+    let tail = nodes.split_off(split);
+    Node::Split {
+        direction,
+        ratio: split as f32 / total as f32,
+        first: Box::new(stack(nodes, direction)),
+        second: Box::new(stack(tail, direction)),
+    }
+}
+
+/// One pane keeps half the tab; the others share the other half.
+fn main_and_stack(panes: &[PaneId], direction: Direction, rest: Direction) -> Node {
+    let (main, others) = panes.split_first().expect("non-empty");
+    if others.is_empty() {
+        return Node::Pane(*main);
+    }
+    Node::Split {
+        direction,
+        ratio: 0.5,
+        first: Box::new(Node::Pane(*main)),
+        second: Box::new(balanced(others, rest)),
+    }
+}
+
+fn build_shape(panes: &[PaneId], shape: LayoutShape) -> Node {
+    match shape {
+        LayoutShape::Grid => grid(panes),
+        LayoutShape::Columns => balanced(panes, Direction::Horizontal),
+        LayoutShape::Rows => balanced(panes, Direction::Vertical),
+        LayoutShape::MainVertical => {
+            main_and_stack(panes, Direction::Horizontal, Direction::Vertical)
+        }
+        LayoutShape::MainHorizontal => {
+            main_and_stack(panes, Direction::Vertical, Direction::Horizontal)
+        }
+    }
+}
+
+#[cfg(test)]
+mod rearrange_tests {
+    use super::*;
+
+    fn ids(n: usize) -> Vec<PaneId> {
+        (0..n).map(|_| PaneId::alloc()).collect()
+    }
+
+    fn leaves(node: &Node) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        collect_shape_ids(node, &mut out);
+        out
+    }
+
+    fn depth_of(node: &Node, target: PaneId, depth: usize) -> Option<usize> {
+        match node {
+            Node::Pane(id) => (*id == target).then_some(depth),
+            Node::Split { first, second, .. } => depth_of(first, target, depth + 1)
+                .or_else(|| depth_of(second, target, depth + 1)),
+        }
+    }
+
+    #[test]
+    fn every_shape_preserves_exactly_the_panes_it_was_given() {
+        for count in 1..=12 {
+            let panes = ids(count);
+            for shape in [
+                LayoutShape::Grid,
+                LayoutShape::Columns,
+                LayoutShape::Rows,
+                LayoutShape::MainVertical,
+                LayoutShape::MainHorizontal,
+            ] {
+                let built = leaves(&build_shape(&panes, shape));
+                assert_eq!(
+                    built.len(),
+                    count,
+                    "{shape:?} with {count} panes changed the pane count"
+                );
+                let mut want: Vec<u32> = panes.iter().map(|p| p.raw()).collect();
+                let mut got: Vec<u32> = built.iter().map(|p| p.raw()).collect();
+                want.sort_unstable();
+                got.sort_unstable();
+                assert_eq!(want, got, "{shape:?} with {count} panes lost or duplicated");
+            }
+        }
+    }
+
+    #[test]
+    fn four_panes_as_a_grid_are_two_by_two() {
+        let panes = ids(4);
+        let root = build_shape(&panes, LayoutShape::Grid);
+        // Outer split stacks two rows; each row splits into two columns.
+        let Node::Split { direction, first, second, .. } = &root else {
+            panic!("grid root should be a split");
+        };
+        assert_eq!(*direction, Direction::Vertical);
+        for row in [first, second] {
+            let Node::Split { direction, .. } = row.as_ref() else {
+                panic!("each grid row should split into columns");
+            };
+            assert_eq!(*direction, Direction::Horizontal);
+        }
+        // Every pane sits at the same depth -- that is what makes it a grid
+        // rather than a staircase, which is what repeated splitting produces.
+        let depths: Vec<usize> = panes
+            .iter()
+            .map(|pane| depth_of(&root, *pane, 0).expect("pane in tree"))
+            .collect();
+        assert_eq!(depths, vec![2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn columns_are_balanced_not_a_right_leaning_staircase() {
+        let panes = ids(4);
+        let root = build_shape(&panes, LayoutShape::Columns);
+        let depths: Vec<usize> = panes
+            .iter()
+            .map(|pane| depth_of(&root, *pane, 0).expect("pane in tree"))
+            .collect();
+        // Repeated `pane split` gives 1,2,3,3; balanced gives 2,2,2,2.
+        assert_eq!(depths, vec![2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn main_vertical_gives_the_first_pane_half_the_tab() {
+        let panes = ids(3);
+        let root = build_shape(&panes, LayoutShape::MainVertical);
+        let Node::Split { direction, ratio, first, .. } = &root else {
+            panic!("expected a split");
+        };
+        assert_eq!(*direction, Direction::Horizontal);
+        assert!((*ratio - 0.5).abs() < f32::EPSILON);
+        assert!(matches!(first.as_ref(), Node::Pane(id) if *id == panes[0]));
+    }
+
+    #[test]
+    fn odd_grid_puts_the_extra_pane_in_an_earlier_row() {
+        let panes = ids(5);
+        let root = build_shape(&panes, LayoutShape::Grid);
+        assert_eq!(leaves(&root).len(), 5);
+        let Node::Split { first, second, .. } = &root else {
+            panic!("expected a split");
+        };
+        assert_eq!(leaves(first).len(), 3);
+        assert_eq!(leaves(second).len(), 2);
     }
 }

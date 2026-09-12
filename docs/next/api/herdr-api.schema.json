@@ -2317,6 +2317,25 @@
             }
           ]
         },
+        "LayoutRearrangeParams": {
+          "description": "Re-tile a tab's existing panes into a named shape.\n\nUnlike `layout.apply`, this never creates or destroys a pane: the tab keeps\nexactly the panes it has, with their processes, and only the split tree\nabove them is rebuilt.",
+          "properties": {
+            "shape": {
+              "$ref": "#/schemas/request/$defs/LayoutShape"
+            },
+            "tab_id": {
+              "description": "Target tab. Defaults to the active tab of the active workspace.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "shape"
+          ],
+          "type": "object"
+        },
         "LayoutSetSplitRatioParams": {
           "properties": {
             "pane_id": {
@@ -2347,6 +2366,35 @@
             "ratio"
           ],
           "type": "object"
+        },
+        "LayoutShape": {
+          "oneOf": [
+            {
+              "const": "grid",
+              "description": "As square as the pane count allows, rows of columns.",
+              "type": "string"
+            },
+            {
+              "const": "columns",
+              "description": "One column per pane, left to right.",
+              "type": "string"
+            },
+            {
+              "const": "rows",
+              "description": "One row per pane, top to bottom.",
+              "type": "string"
+            },
+            {
+              "const": "main_vertical",
+              "description": "First pane keeps the left half; the rest stack in the right half.",
+              "type": "string"
+            },
+            {
+              "const": "main_horizontal",
+              "description": "First pane keeps the top half; the rest sit side by side below.",
+              "type": "string"
+            }
+          ]
         },
         "NotificationShowParams": {
           "properties": {
@@ -5619,6 +5667,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/LayoutSetSplitRatioParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.rearrange",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutRearrangeParams"
             }
           },
           "required": [
@@ -9731,6 +9795,22 @@
                 },
                 "type": {
                   "const": "layout_split_ratio_set",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "layout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "layout": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutDescription"
+                },
+                "type": {
+                  "const": "layout_rearrange",
                   "type": "string"
                 }
               },
