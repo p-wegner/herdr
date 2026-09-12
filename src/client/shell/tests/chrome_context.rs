@@ -458,6 +458,22 @@ fn pane_context_menu_offers_move_destinations_and_routes_them() {
         .collect();
     assert_eq!(move_labels, vec!["Move to tab: scratch"]);
 
+    // The dynamic label is a Cow::Owned; make sure it actually reaches the screen,
+    // since every other menu entry is a &'static str.
+    let frame = state.compose(106, 20).expect("composed frame");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("
+");
+    assert!(text.contains("Move to tab: scratch"), "menu text was: {text}");
+
     let index = items
         .iter()
         .position(|item| item.action == ClientContextMenuAction::MoveToTab(0))
