@@ -26,6 +26,10 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.focus_direction",
     "pane.input.set",
     "pane.link.activate",
+    // pane.move predates any client-shell caller: only the CLI used it, so it
+    // was never added here and the context menu's move entries were refused
+    // with "This server does not support pane.move yet".
+    "pane.move",
     "pane.rename",
     "pane.resize",
     "pane.scroll",
@@ -352,6 +356,17 @@ mod tests {
                 col: 0,
                 content_revision: None,
                 offset_from_bottom: None,
+            },
+        )));
+        // The pane context menu moves panes, so this lane must carry pane.move.
+        assert!(supports_client_shell_method(&Method::PaneMove(
+            crate::api::schema::PaneMoveParams {
+                pane_id: "w1:p1".into(),
+                destination: crate::api::schema::PaneMoveDestination::NewTab {
+                    workspace_id: None,
+                    label: None,
+                },
+                focus: true,
             },
         )));
         assert!(!supports_client_shell_method(&Method::Ping(
