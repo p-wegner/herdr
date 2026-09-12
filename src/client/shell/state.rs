@@ -583,10 +583,25 @@ pub(super) enum ClientContextMenuAction {
     ClosePane,
     MoveToNewTab,
     MoveToNewWorkspace,
+    /// Chosen inside the direction submenu: place the pane right of / below the
+    /// destination tab's focused pane. SplitDirection has no Left or Up, so
+    /// these two are the whole vocabulary.
+    ConfirmMoveRight,
+    ConfirmMoveDown,
+    Rearrange(ClientRearrangeShape),
     /// Move the pane into an existing tab. The index addresses
     /// `ClientContextMenuTarget::Pane::move_targets`, which is frozen when the
     /// menu opens so a snapshot arriving mid-menu cannot retarget the action.
     MoveToTab(usize),
+}
+
+/// Shapes offered by the tab menu; mirrors api::schema::LayoutShape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientRearrangeShape {
+    Grid,
+    Columns,
+    Rows,
+    MainVertical,
 }
 
 /// A tab this pane can be moved into, captured when the context menu opens.
@@ -616,6 +631,13 @@ pub(super) enum ClientContextMenuTarget {
         has_manual_label: bool,
         right_click_passthrough: bool,
         move_targets: Vec<ClientPaneMoveTarget>,
+    },
+    /// Second level of the pane menu: the destination tab is already chosen,
+    /// this picks where in it the pane lands.
+    PaneMoveDirection {
+        pane_id: String,
+        tab_id: String,
+        tab_label: String,
     },
 }
 

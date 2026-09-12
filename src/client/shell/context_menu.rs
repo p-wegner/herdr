@@ -47,7 +47,19 @@ impl ClientContextMenuOverlay {
             ClientContextMenuTarget::Tab { .. } => vec![
                 item("New tab", Action::NewTab),
                 item("Rename", Action::Rename),
+                // Re-tiles the panes this tab already has; no process is moved.
+                item("Tile: grid", Action::Rearrange(ClientRearrangeShape::Grid)),
+                item("Tile: columns", Action::Rearrange(ClientRearrangeShape::Columns)),
+                item("Tile: rows", Action::Rearrange(ClientRearrangeShape::Rows)),
+                item(
+                    "Tile: main + stack",
+                    Action::Rearrange(ClientRearrangeShape::MainVertical),
+                ),
                 item("Close", Action::Close),
+            ],
+            ClientContextMenuTarget::PaneMoveDirection { .. } => vec![
+                item("Place right of focused pane", Action::ConfirmMoveRight),
+                item("Place below focused pane", Action::ConfirmMoveDown),
             ],
             ClientContextMenuTarget::Pane {
                 source_pane_id,
@@ -73,7 +85,7 @@ impl ClientContextMenuOverlay {
                 for (index, target) in move_targets.iter().enumerate() {
                     items.push(ClientContextMenuItem {
                         label: std::borrow::Cow::Owned(format!(
-                            "Move to tab: {}",
+                            "Move to tab: {} ▸",
                             target.label
                         )),
                         action: Action::MoveToTab(index),
@@ -224,7 +236,13 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         };
+        let (menu_x, menu_y) = (menu.x, menu.y);
         match menu.target {
+            ClientContextMenuTarget::PaneMoveDirection {
+                pane_id,
+                tab_id,
+                tab_label,
+            } => self.activate_pane_move_direction(pane_id, tab_id, tab_label, action, outcome),
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
             }
@@ -246,6 +264,8 @@ impl ClientShellState {
                 right_click_passthrough,
                 move_targets,
                 action,
+                menu_x,
+                menu_y,
                 outcome,
             ),
         }
@@ -331,7 +351,7 @@ impl ClientShellState {
         action: ClientContextMenuAction,
         outcome: &mut ClientShellInput,
     ) {
-        use crate::api::schema::{Method, TabTarget};
+        use crate::api::schema::{LayoutRearrangeParams, LayoutShape, Method, TabTarget};
 
         self.push_endpoint_method(
             Method::TabFocus(TabTarget {
@@ -340,6 +360,21 @@ impl ClientShellState {
             outcome,
         );
         match action {
+            ClientContextMenuAction::Rearrange(shape) => {
+                let shape = match shape {
+                    ClientRearrangeShape::Grid => LayoutShape::Grid,
+                    ClientRearrangeShape::Columns => LayoutShape::Columns,
+                    ClientRearrangeShape::Rows => LayoutShape::Rows,
+                    ClientRearrangeShape::MainVertical => LayoutShape::MainVertical,
+                };
+                self.push_endpoint_method(
+                    Method::LayoutRearrange(LayoutRearrangeParams {
+                        tab_id: Some(tab_id),
+                        shape,
+                    }),
+                    outcome,
+                );
+            }
             ClientContextMenuAction::NewTab => {
                 if self.config.prompt_new_tab_name {
                     let default_name = (self
@@ -402,6 +437,43 @@ impl ClientShellState {
         }
     }
 
+
+    /// Second level of the pane move menu: the destination tab is already
+    /// chosen, this says where in it the pane lands. `target_pane_id: None`
+    /// means the destination tab's focused pane, which the server resolves.
+    fn activate_pane_move_direction(
+        &mut self,
+        pane_id: String,
+        tab_id: String,
+        tab_label: String,
+        action: ClientContextMenuAction,
+        outcome: &mut ClientShellInput,
+    ) {
+        use crate::api::schema::{
+            Method, PaneMoveDestination, PaneMoveParams, SplitDirection,
+        };
+
+        let split = match action {
+            ClientContextMenuAction::ConfirmMoveRight => SplitDirection::Right,
+            ClientContextMenuAction::ConfirmMoveDown => SplitDirection::Down,
+            _ => return,
+        };
+        let _ = tab_label;
+        self.push_endpoint_method(
+            Method::PaneMove(PaneMoveParams {
+                pane_id,
+                destination: PaneMoveDestination::Tab {
+                    tab_id,
+                    target_pane_id: None,
+                    split,
+                    ratio: None,
+                },
+                focus: true,
+            }),
+            outcome,
+        );
+    }
+
     fn activate_pane_context_action(
         &mut self,
         pane_id: String,
@@ -410,6 +482,8 @@ impl ClientShellState {
         right_click_passthrough: bool,
         move_targets: Vec<ClientPaneMoveTarget>,
         action: ClientContextMenuAction,
+        menu_x: u16,
+        menu_y: u16,
         outcome: &mut ClientShellInput,
     ) {
         use crate::api::schema::{
@@ -498,20 +572,21 @@ impl ClientShellState {
                 outcome,
             ),
             ClientContextMenuAction::MoveToTab(index) => {
+                // Don't dispatch yet: a move needs a direction, and defaulting it
+                // to Right is what made every move land as a new column.
                 if let Some(target) = move_targets.get(index) {
-                    self.push_endpoint_method(
-                        Method::PaneMove(PaneMoveParams {
-                            pane_id,
-                            destination: PaneMoveDestination::Tab {
+                    self.overlay = Some(ClientShellOverlay::ContextMenu(
+                        ClientContextMenuOverlay {
+                            target: ClientContextMenuTarget::PaneMoveDirection {
+                                pane_id,
                                 tab_id: target.tab_id.clone(),
-                                target_pane_id: None,
-                                split: SplitDirection::Right,
-                                ratio: None,
+                                tab_label: target.label.clone(),
                             },
-                            focus: true,
-                        }),
-                        outcome,
-                    );
+                            x: menu_x,
+                            y: menu_y,
+                            highlighted: 0,
+                        },
+                    ));
                 }
             }
             ClientContextMenuAction::MoveToNewTab => self.push_endpoint_method(

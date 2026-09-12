@@ -456,7 +456,7 @@ fn pane_context_menu_offers_move_destinations_and_routes_them() {
         .filter(|item| matches!(item.action, ClientContextMenuAction::MoveToTab(_)))
         .map(|item| item.label.as_ref())
         .collect();
-    assert_eq!(move_labels, vec!["Move to tab: scratch"]);
+    assert_eq!(move_labels, vec!["Move to tab: scratch ▸"]);
 
     // The dynamic label is a Cow::Owned; make sure it actually reaches the screen,
     // since every other menu entry is a &'static str.
@@ -472,14 +472,35 @@ fn pane_context_menu_offers_move_destinations_and_routes_them() {
         .collect::<Vec<_>>()
         .join("
 ");
-    assert!(text.contains("Move to tab: scratch"), "menu text was: {text}");
+    assert!(text.contains("Move to tab: scratch ▸"), "menu text was: {text}");
 
     let index = items
         .iter()
         .position(|item| item.action == ClientContextMenuAction::MoveToTab(0))
         .expect("move-to-tab item");
+    // Picking a tab opens the direction submenu rather than dispatching: a move
+    // with an assumed direction is what made every move land as a new column.
     let mut outcome = ClientShellInput::default();
     state.activate_context_menu_item(index, &mut outcome);
+    assert!(
+        outcome.actions.is_empty(),
+        "choosing a destination tab must not dispatch on its own"
+    );
+    let direction_index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            assert!(matches!(
+                menu.target,
+                ClientContextMenuTarget::PaneMoveDirection { ref tab_id, .. } if tab_id == "tab_2"
+            ));
+            menu.items()
+                .iter()
+                .position(|item| item.action == ClientContextMenuAction::ConfirmMoveDown)
+                .expect("place-below item")
+        }
+        _ => panic!("expected the move-direction submenu"),
+    };
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(direction_index, &mut outcome);
     let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
         panic!("move-to-tab should route through the endpoint API");
     };
@@ -488,7 +509,8 @@ fn pane_context_menu_offers_move_destinations_and_routes_them() {
             assert_eq!(params.pane_id, "pane_1");
             assert!(matches!(
                 &params.destination,
-                PaneMoveDestination::Tab { tab_id, .. } if tab_id == "tab_2"
+                PaneMoveDestination::Tab { tab_id, split, .. }
+                    if tab_id == "tab_2" && *split == crate::api::schema::SplitDirection::Down
             ));
         }
         other => panic!("expected pane move, got {other:?}"),
