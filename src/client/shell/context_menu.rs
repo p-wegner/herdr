@@ -4,7 +4,10 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let item = |label: &'static str, action| ClientContextMenuItem {
+            label: std::borrow::Cow::Borrowed(label),
+            action,
+        };
         match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -50,6 +53,7 @@ impl ClientContextMenuOverlay {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
+                move_targets,
                 ..
             } => {
                 let mut items = vec![item("Rename pane", Action::RenamePane)];
@@ -63,6 +67,21 @@ impl ClientContextMenuOverlay {
                     item("Split right", Action::SplitRight),
                     item("Split down", Action::SplitDown),
                     item("Zoom", Action::Zoom),
+                ]);
+                // Moving a pane into the tab it already occupies is a server-side
+                // no-op (PaneMoveReason::SameTab), so the current tab is not offered.
+                for (index, target) in move_targets.iter().enumerate() {
+                    items.push(ClientContextMenuItem {
+                        label: std::borrow::Cow::Owned(format!(
+                            "Move to tab: {}",
+                            target.label
+                        )),
+                        action: Action::MoveToTab(index),
+                    });
+                }
+                items.extend([
+                    item("Move to new tab", Action::MoveToNewTab),
+                    item("Move to new workspace", Action::MoveToNewWorkspace),
                     item(
                         if *right_click_passthrough {
                             "Use Herdr right-click menu"
@@ -153,6 +172,19 @@ impl ClientShellState {
             .focused_pane_id
             .clone()
             .filter(|focused| focused != &pane_id);
+        // Every other tab in this workspace is a move destination. The pane's own
+        // tab is excluded: the server answers a same-tab move with changed=false.
+        // Captured now rather than read at activation time, so MoveToTab(index)
+        // cannot be pointed at a different tab by a snapshot landing mid-menu.
+        let move_targets: Vec<ClientPaneMoveTarget> = snapshot
+            .tabs
+            .iter()
+            .filter(|tab| tab.workspace_id == pane.workspace_id && tab.tab_id != pane.tab_id)
+            .map(|tab| ClientPaneMoveTarget {
+                tab_id: tab.tab_id.clone(),
+                label: tab.label.clone(),
+            })
+            .collect();
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Pane {
                 pane_id,
@@ -160,6 +192,7 @@ impl ClientShellState {
                 source_pane_id,
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
+                move_targets,
             },
             x,
             y,
@@ -204,12 +237,14 @@ impl ClientShellState {
                 workspace_id,
                 source_pane_id,
                 right_click_passthrough,
+                move_targets,
                 ..
             } => self.activate_pane_context_action(
                 pane_id,
                 workspace_id,
                 source_pane_id,
                 right_click_passthrough,
+                move_targets,
                 action,
                 outcome,
             ),
@@ -373,12 +408,14 @@ impl ClientShellState {
         workspace_id: String,
         source_pane_id: Option<String>,
         right_click_passthrough: bool,
+        move_targets: Vec<ClientPaneMoveTarget>,
         action: ClientContextMenuAction,
         outcome: &mut ClientShellInput,
     ) {
         use crate::api::schema::{
-            Method, PaneInputSetParams, PaneRenameParams, PaneRightClickTarget, PaneSplitParams,
-            PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
+            Method, PaneInputSetParams, PaneMoveDestination, PaneMoveParams, PaneRenameParams,
+            PaneRightClickTarget, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode,
+            PaneZoomParams, SplitDirection,
         };
 
         match action {
@@ -457,6 +494,45 @@ impl ClientShellState {
                     } else {
                         PaneRightClickTarget::Pane
                     },
+                }),
+                outcome,
+            ),
+            ClientContextMenuAction::MoveToTab(index) => {
+                if let Some(target) = move_targets.get(index) {
+                    self.push_endpoint_method(
+                        Method::PaneMove(PaneMoveParams {
+                            pane_id,
+                            destination: PaneMoveDestination::Tab {
+                                tab_id: target.tab_id.clone(),
+                                target_pane_id: None,
+                                split: SplitDirection::Right,
+                                ratio: None,
+                            },
+                            focus: true,
+                        }),
+                        outcome,
+                    );
+                }
+            }
+            ClientContextMenuAction::MoveToNewTab => self.push_endpoint_method(
+                Method::PaneMove(PaneMoveParams {
+                    pane_id,
+                    destination: PaneMoveDestination::NewTab {
+                        workspace_id: Some(workspace_id),
+                        label: None,
+                    },
+                    focus: true,
+                }),
+                outcome,
+            ),
+            ClientContextMenuAction::MoveToNewWorkspace => self.push_endpoint_method(
+                Method::PaneMove(PaneMoveParams {
+                    pane_id,
+                    destination: PaneMoveDestination::NewWorkspace {
+                        label: None,
+                        tab_label: None,
+                    },
+                    focus: true,
                 }),
                 outcome,
             ),

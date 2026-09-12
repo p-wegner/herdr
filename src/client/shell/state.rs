@@ -581,6 +581,19 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    MoveToNewTab,
+    MoveToNewWorkspace,
+    /// Move the pane into an existing tab. The index addresses
+    /// `ClientContextMenuTarget::Pane::move_targets`, which is frozen when the
+    /// menu opens so a snapshot arriving mid-menu cannot retarget the action.
+    MoveToTab(usize),
+}
+
+/// A tab this pane can be moved into, captured when the context menu opens.
+#[derive(Clone, Debug)]
+pub(super) struct ClientPaneMoveTarget {
+    pub(super) tab_id: String,
+    pub(super) label: String,
 }
 
 #[derive(Debug)]
@@ -602,6 +615,7 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        move_targets: Vec<ClientPaneMoveTarget>,
     },
 }
 
@@ -614,7 +628,7 @@ pub(super) struct ClientContextMenuOverlay {
 }
 
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+    pub(super) label: std::borrow::Cow<'static, str>,
     pub(super) action: ClientContextMenuAction,
 }
 

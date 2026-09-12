@@ -425,3 +425,77 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close(
             if params.workspace_id == "ws_1" && params.close_group
     ));
 }
+
+#[test]
+fn pane_context_menu_offers_move_destinations_and_routes_them() {
+    use crate::api::schema::{Method, PaneMoveDestination};
+
+    // Two tabs in one workspace: the pane sits in tab_1, so only tab_2 is a
+    // legal destination -- a same-tab move is a server-side no-op.
+    let mut snap = snapshot();
+    let mut second_tab = snap.tabs[0].clone();
+    second_tab.tab_id = "tab_2".into();
+    second_tab.number = 2;
+    second_tab.label = "scratch".into();
+    second_tab.focused = false;
+    snap.tabs.push(second_tab);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snap));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("composed frame");
+    state.open_pane_context_menu("pane_1".into(), 0, 0);
+
+    let items = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu.items(),
+        _ => panic!("pane context menu"),
+    };
+    // The pane's own tab must not be offered, the other one must be, by label.
+    let move_labels: Vec<&str> = items
+        .iter()
+        .filter(|item| matches!(item.action, ClientContextMenuAction::MoveToTab(_)))
+        .map(|item| item.label.as_ref())
+        .collect();
+    assert_eq!(move_labels, vec!["Move to tab: scratch"]);
+
+    let index = items
+        .iter()
+        .position(|item| item.action == ClientContextMenuAction::MoveToTab(0))
+        .expect("move-to-tab item");
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("move-to-tab should route through the endpoint API");
+    };
+    match &request.method {
+        Method::PaneMove(params) => {
+            assert_eq!(params.pane_id, "pane_1");
+            assert!(matches!(
+                &params.destination,
+                PaneMoveDestination::Tab { tab_id, .. } if tab_id == "tab_2"
+            ));
+        }
+        other => panic!("expected pane move, got {other:?}"),
+    }
+
+    // New-tab and new-workspace destinations route too.
+    state.open_pane_context_menu("pane_1".into(), 0, 0);
+    let index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .position(|item| item.action == ClientContextMenuAction::MoveToNewWorkspace)
+            .expect("move-to-new-workspace item"),
+        _ => panic!("pane context menu"),
+    };
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("move-to-new-workspace should route through the endpoint API");
+    };
+    assert!(matches!(
+        &request.method,
+        Method::PaneMove(params)
+            if matches!(params.destination, PaneMoveDestination::NewWorkspace { .. })
+    ));
+}
