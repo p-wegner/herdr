@@ -391,6 +391,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Resume supported AI-agent panes into their native conversation sessions after
 # a Herdr server restart. Requires official integrations that report session refs.
 # resume_agents_on_restore = true
+#
+# Replace an agent's built-in resume command, e.g. with a wrapper that restores the
+# flags, auth profile and environment the agent was launched with. `{session}` in any
+# argument receives the session id. The line is typed into the pane's default shell.
+# [session.resume_commands]
+# claude = ["powershell", "-NoProfile", "-File", "C:/tools/claude-resume.ps1", "{session}"]
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.

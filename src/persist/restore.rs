@@ -22,8 +22,29 @@ use super::{
     WorkspaceSnapshot,
 };
 
+/// How restored agent panes are resumed: whether at all, and with which
+/// user-configured commands in place of the built-in argv.
+#[derive(Clone, Copy)]
+pub struct AgentResumeOptions<'a> {
+    pub enabled: bool,
+    pub commands: &'a crate::agent_resume::ResumeCommands,
+}
+
+static NO_RESUME_COMMANDS: crate::agent_resume::ResumeCommands =
+    crate::agent_resume::ResumeCommands::new();
+
+impl AgentResumeOptions<'static> {
+    /// Built-in resume argv only.
+    pub fn builtin(enabled: bool) -> Self {
+        Self {
+            enabled,
+            commands: &NO_RESUME_COMMANDS,
+        }
+    }
+}
+
 struct AgentRestoreState<'a> {
-    enabled: bool,
+    options: AgentResumeOptions<'a>,
     resumed_sessions: &'a mut HashSet<String>,
 }
 
@@ -37,7 +58,7 @@ struct PaneRestoreStartup<'a> {
 struct RestoreRuntimeContext<'a> {
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
-    resume_agents_on_restore: bool,
+    agent_resume: AgentResumeOptions<'a>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -70,7 +91,7 @@ pub fn restore(
     scrollback_limit_bytes: usize,
     default_shell: &str,
     shell_mode: crate::config::ShellModeConfig,
-    resume_agents_on_restore: bool,
+    agent_resume: AgentResumeOptions<'_>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -83,7 +104,7 @@ pub fn restore(
         cols,
         scrollback_limit_bytes,
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
-        resume_agents_on_restore,
+        agent_resume,
         &mut imported_panes,
         events,
         render_notify,
@@ -109,7 +130,7 @@ pub fn restore_handoff(
         80,
         scrollback_limit_bytes,
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
-        true,
+        AgentResumeOptions::builtin(true),
         imports,
         events,
         render_notify,
@@ -192,7 +213,7 @@ fn restore_with_imports_strict(
     cols: u16,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
+    agent_resume: AgentResumeOptions<'_>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -205,7 +226,7 @@ fn restore_with_imports_strict(
         cols,
         scrollback_limit_bytes,
         shell_config,
-        resume_agents_on_restore,
+        agent_resume,
         imported_panes,
         events,
         render_notify,
@@ -232,7 +253,7 @@ fn restore_with_imports(
     cols: u16,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
+    agent_resume: AgentResumeOptions<'_>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -245,7 +266,7 @@ fn restore_with_imports(
         cols,
         scrollback_limit_bytes,
         shell_config,
-        resume_agents_on_restore,
+        agent_resume,
         imported_panes,
         events,
         render_notify,
@@ -261,7 +282,7 @@ fn restore_with_imports_and_failures(
     cols: u16,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
+    agent_resume: AgentResumeOptions<'_>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
@@ -276,7 +297,7 @@ fn restore_with_imports_and_failures(
         let runtime_context = RestoreRuntimeContext {
             scrollback_limit_bytes,
             shell_config,
-            resume_agents_on_restore,
+            agent_resume,
             events: events.clone(),
             render_notify: render_notify.clone(),
             render_dirty: render_dirty.clone(),
@@ -501,7 +522,7 @@ fn restore_tab(
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
             let mut agent_restore = AgentRestoreState {
-                enabled: runtime_context.resume_agents_on_restore,
+                options: runtime_context.agent_resume,
                 resumed_sessions: resumed_agent_sessions,
             };
             pane_restore_startup(saved_agent_session, saved_history, &mut agent_restore)
@@ -746,7 +767,7 @@ fn pane_restore_startup<'a>(
     // presentation history into that terminal, even when this pane is a
     // duplicate suppressed by session de-duplication.
     let restore_plan =
-        session.and_then(|session| restore_plan_for_snapshot(session, agent_restore.enabled));
+        session.and_then(|session| restore_plan_for_snapshot(session, agent_restore.options));
     let has_native_agent_restore = restore_plan.is_some();
     // Reserve before spawning so later panes in the same restore pass cannot
     // launch the same native agent session. The caller rolls this reservation
@@ -783,13 +804,18 @@ fn pane_restore_startup<'a>(
 
 fn restore_plan_for_snapshot(
     session: &PaneAgentSessionSnapshot,
-    resume_agents_on_restore: bool,
+    options: AgentResumeOptions<'_>,
 ) -> Option<crate::agent_resume::AgentResumePlan> {
-    if !resume_agents_on_restore {
+    if !options.enabled {
         return None;
     }
     let persisted = persisted_agent_session_from_snapshot(session)?;
-    crate::agent_resume::plan(&session.source, &session.agent, &persisted.session_ref)
+    crate::agent_resume::plan_with_commands(
+        &session.source,
+        &session.agent,
+        &persisted.session_ref,
+        options.commands,
+    )
 }
 
 fn persisted_agent_session_from_snapshot(
@@ -819,8 +845,11 @@ fn take_restore_plan_for_snapshot(
     resume_agents_on_restore: bool,
     resumed_agent_sessions: &mut HashSet<String>,
 ) -> Option<crate::agent_resume::AgentResumePlan> {
-    restore_plan_for_snapshot(session, resume_agents_on_restore)
-        .filter(|plan| resumed_agent_sessions.insert(plan.dedupe_key.clone()))
+    restore_plan_for_snapshot(
+        session,
+        AgentResumeOptions::builtin(resume_agents_on_restore),
+    )
+    .filter(|plan| resumed_agent_sessions.insert(plan.dedupe_key.clone()))
 }
 
 pub(super) fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Option<Node> {
@@ -1019,9 +1048,11 @@ mod tests {
             value: pi_session_path.clone(),
         };
 
-        assert!(restore_plan_for_snapshot(&session, false).is_none());
+        assert!(restore_plan_for_snapshot(&session, AgentResumeOptions::builtin(false)).is_none());
         assert_eq!(
-            restore_plan_for_snapshot(&session, true).unwrap().argv,
+            restore_plan_for_snapshot(&session, AgentResumeOptions::builtin(true))
+                .unwrap()
+                .argv,
             vec!["pi", "--session", pi_session_path.as_str()]
         );
 
@@ -1031,7 +1062,34 @@ mod tests {
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("claude-session"),
         };
-        assert!(restore_plan_for_snapshot(&unsupported_path, true).is_none());
+        assert!(
+            restore_plan_for_snapshot(&unsupported_path, AgentResumeOptions::builtin(true))
+                .is_none()
+        );
+
+        let mut commands = crate::agent_resume::ResumeCommands::new();
+        commands.insert("pi".into(), vec!["pi-wrapper".into(), "{session}".into()]);
+        let configured = AgentResumeOptions {
+            enabled: true,
+            commands: &commands,
+        };
+        assert_eq!(
+            restore_plan_for_snapshot(&session, configured)
+                .unwrap()
+                .argv,
+            vec!["pi-wrapper", pi_session_path.as_str()]
+        );
+        assert!(
+            restore_plan_for_snapshot(
+                &session,
+                AgentResumeOptions {
+                    enabled: false,
+                    ..configured
+                }
+            )
+            .is_none(),
+            "a configured command does not override resume_agents_on_restore = false"
+        );
     }
 
     #[test]
@@ -1071,7 +1129,7 @@ mod tests {
         };
         let mut resumed = HashSet::new();
         let mut agent_restore = AgentRestoreState {
-            enabled: true,
+            options: AgentResumeOptions::builtin(true),
             resumed_sessions: &mut resumed,
         };
 
@@ -1096,7 +1154,7 @@ mod tests {
         };
         let mut resumed = HashSet::new();
         let mut agent_restore = AgentRestoreState {
-            enabled: true,
+            options: AgentResumeOptions::builtin(true),
             resumed_sessions: &mut resumed,
         };
 
@@ -1124,7 +1182,7 @@ mod tests {
         };
         let mut resumed = HashSet::new();
         let mut agent_restore = AgentRestoreState {
-            enabled: false,
+            options: AgentResumeOptions::builtin(false),
             resumed_sessions: &mut resumed,
         };
 
@@ -1222,7 +1280,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            false,
+            crate::persist::AgentResumeOptions::builtin(false),
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
@@ -1315,7 +1373,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            false,
+            crate::persist::AgentResumeOptions::builtin(false),
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
@@ -1422,7 +1480,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            false,
+            crate::persist::AgentResumeOptions::builtin(false),
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
@@ -1533,7 +1591,7 @@ mod tests {
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            true,
+            crate::persist::AgentResumeOptions::builtin(true),
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
@@ -1596,7 +1654,7 @@ mod tests {
             4096,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            false,
+            crate::persist::AgentResumeOptions::builtin(false),
             events,
             render_notify,
             render_dirty,
@@ -1634,7 +1692,7 @@ mod tests {
             4096,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
-            false,
+            crate::persist::AgentResumeOptions::builtin(false),
             events,
             render_notify,
             render_dirty,

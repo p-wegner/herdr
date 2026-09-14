@@ -268,12 +268,17 @@ pub struct SessionConfig {
     /// Resume supported AI-agent panes into their native conversation sessions
     /// when restoring a Herdr session. Default: true.
     pub resume_agents_on_restore: bool,
+    /// Per-agent command that replaces the built-in resume argv, keyed by agent
+    /// label (e.g. `claude`). `{session}` in any argument receives the session
+    /// id. Use it to relaunch through a wrapper that restores launch flags.
+    pub resume_commands: crate::agent_resume::ResumeCommands,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             resume_agents_on_restore: true,
+            resume_commands: Default::default(),
         }
     }
 }
@@ -1399,6 +1404,18 @@ resume_agents_on_restore = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
+        assert!(config.session.resume_commands.is_empty());
+
+        let toml = r#"
+[session.resume_commands]
+claude = ["powershell", "-File", "C:/tools/resume.ps1", "{session}"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.session.resume_agents_on_restore);
+        assert_eq!(
+            config.session.resume_commands["claude"],
+            vec!["powershell", "-File", "C:/tools/resume.ps1", "{session}"]
+        );
     }
 
     #[test]

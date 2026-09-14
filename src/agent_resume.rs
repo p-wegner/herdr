@@ -235,6 +235,34 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
     })
 }
 
+/// User-configured resume commands, keyed by agent label (`[session.resume_commands]`).
+pub type ResumeCommands = std::collections::BTreeMap<String, Vec<String>>;
+
+/// Placeholder in a configured resume command that receives the session id or path.
+pub const SESSION_PLACEHOLDER: &str = "{session}";
+
+/// Like [`plan`], but a configured command for the agent replaces the built-in argv.
+///
+/// The built-in plan still decides whether the agent is resumable at all, so a
+/// configured command can change how a supported agent is relaunched (a wrapper
+/// that restores launch flags, auth profile or environment) but cannot make an
+/// unsupported source resumable. An empty configured argv is ignored.
+pub fn plan_with_commands(
+    source: &str,
+    agent: &str,
+    session_ref: &AgentSessionRef,
+    commands: &ResumeCommands,
+) -> Option<AgentResumePlan> {
+    let mut plan = plan(source, agent, session_ref)?;
+    if let Some(template) = commands.get(agent).filter(|argv| !argv.is_empty()) {
+        plan.argv = template
+            .iter()
+            .map(|part| part.replace(SESSION_PLACEHOLDER, &session_ref.value))
+            .collect();
+    }
+    Some(plan)
+}
+
 pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {
     format!(
         "{source}\u{0}{agent}\u{0}{:?}\u{0}{}",
@@ -515,6 +543,59 @@ mod tests {
             .unwrap()
             .argv,
             vec!["grok", "--resume", "grok-session"]
+        );
+    }
+
+    #[test]
+    fn configured_resume_command_replaces_builtin_argv() {
+        let session = AgentSessionRef::id("claude-session").unwrap();
+        let mut commands = ResumeCommands::new();
+        commands.insert(
+            "claude".into(),
+            vec![
+                "powershell".into(),
+                "-File".into(),
+                "C:/tools/resume.ps1".into(),
+                "--id={session}".into(),
+            ],
+        );
+
+        let configured = plan_with_commands("herdr:claude", "claude", &session, &commands).unwrap();
+        assert_eq!(
+            configured.argv,
+            vec![
+                "powershell",
+                "-File",
+                "C:/tools/resume.ps1",
+                "--id=claude-session"
+            ]
+        );
+        assert_eq!(
+            configured.dedupe_key,
+            plan("herdr:claude", "claude", &session).unwrap().dedupe_key
+        );
+
+        let codex = AgentSessionRef::id("codex-session").unwrap();
+        assert_eq!(
+            plan_with_commands("herdr:codex", "codex", &codex, &commands)
+                .unwrap()
+                .argv,
+            vec!["codex", "resume", "codex-session"],
+            "agents without a configured command keep the built-in argv"
+        );
+
+        commands.insert("claude".into(), Vec::new());
+        assert_eq!(
+            plan_with_commands("herdr:claude", "claude", &session, &commands)
+                .unwrap()
+                .argv,
+            vec!["claude", "--resume", "claude-session"],
+            "an empty configured argv falls back to the built-in one"
+        );
+
+        assert!(
+            plan_with_commands("custom:claude", "claude", &session, &commands).is_none(),
+            "a configured command cannot make an unofficial source resumable"
         );
     }
 
